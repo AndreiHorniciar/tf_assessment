@@ -97,17 +97,33 @@ resource "azurerm_public_ip" "test" {
   allocation_method   = "Dynamic"
 }
 
-output "vm_pings" {
-  value = {
-    for i, nic in azurerm_network_interface.test : 
-    "test-vm-${i}" => {
-      for j, other_nic in azurerm_network_interface.test :
-      "test-vm-${j}" => {
-        result = azurerm_linux_virtual_machine.test[i].id != azurerm_linux_virtual_machine.test[j].id ? try(azurerm_network_interface.test[i].private_ip_address != null && azurerm_network_interface.test[j].private_ip_address != null ? 
-            tobool(
-              can("${azurerm_network_interface.test[i].private_ip_address},${azurerm_network_interface.test[j].private_ip_address}", 5, 60)
-            ) : null, null) : null
-      }
-    }
+locals {
+  vms = [
+    for i in range(var.vm_count) : "test-vm-${i}"
+  ]
+
+  vm_ips = [for nic in azurerm_network_interface.test : nic.private_ip_address if regexall("^10\\.0\\.1\\.", nic.private_ip_address)[0] != null]
+}
+
+resource "null_resource" "ping_vms" {
+  count = length(azurerm_linux_virtual_machine.test)
+
+  triggers = {
+    vm_ip = local.vm_ips[count.index]
+  }
+
+  provisioner "local-exec" {
+    command = "ping -c 1 ${element(local.vm_ips, (count.index + 1) % length(local.vm_ips))} > /tmp/ping_${count.index}.txt && echo done"
+    interpreter = ["/bin/bash", "-c"]
+  }
+
+  provisioner "file" {
+    source = "/tmp/ping_${count.index}.txt"
+    destination = "/dev/null"
   }
 }
+
+output "vm_pings" {
+  value = [for _ in null_resource.ping_vms : file("/dev/null")] # Discard output of file provisioner
+}
+
